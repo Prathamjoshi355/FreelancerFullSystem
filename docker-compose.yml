@@ -1,0 +1,113 @@
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: freelancer_mongodb
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: rootpassword
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - freelancer_network
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./freelancerbackend
+      dockerfile: Dockerfile
+    container_name: freelancer_backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DEBUG=false
+      - DJANGO_SECRET_KEY=dev-secret-key-change-in-production
+      - JWT_SECRET=dev-jwt-secret-key-change-in-production
+      - MONGO_DB_NAME=freelancer
+      - MONGO_URI=mongodb://root:rootpassword@mongodb:27017/freelancer?authSource=admin
+      - CHAT_PROTECTION_SERVICE_URL=http://protection:8001
+      - FACE_VERIFICATION_SERVICE_URL=http://face-verification:8001
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      face-verification:
+        condition: service_healthy
+    volumes:
+      - ./freelancerbackend:/app
+    networks:
+      - freelancer_network
+    command: >
+      sh -c "python manage.py migrate &&
+             python manage.py runserver 0.0.0.0:8000"
+
+  protection:
+    build:
+      context: ./FreelancerChatProtection
+      dockerfile: Dockerfile
+    container_name: freelancer_protection
+    ports:
+      - "8001:8001"
+    environment:
+      - TESSERACT_PATH=/usr/bin/tesseract
+      - PYTHONPATH=/app
+    volumes:
+      - ./FreelancerChatProtection:/app
+    networks:
+      - freelancer_network
+    command: uvicorn main:app --host 0.0.0.0 --port 8001 --reload
+
+  face-verification:
+    build:
+      context: ./face-verification-service
+      dockerfile: Dockerfile
+    container_name: freelancer_face_verification
+    ports:
+      - "8002:8001"
+    environment:
+      - SERVICE_PORT=8001
+      - SERVICE_HOST=0.0.0.0
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./face-verification-service/data:/app/data
+    networks:
+      - freelancer_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health', timeout=5)"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+
+  frontend:
+    build:
+      context: ./freelance-frontend
+      dockerfile: Dockerfile
+    container_name: freelancer_frontend
+    ports:
+      - "3000:3000"
+
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_PROTECTION_URL=http://localhost:8001
+    depends_on:
+      - backend
+      - protection
+    volumes:
+      - ./freelance-frontend:/app
+      - /app/node_modules
+    networks:
+      - freelancer_network
+    command: npm run dev
+
+networks:
+  freelancer_network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
